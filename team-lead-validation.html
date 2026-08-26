@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Validation — Outil terrain HSSE</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';
+                 worker-src 'self';" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+  <style>
+    .action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .action-row button { margin: 0; padding: 10px 0; font-size: 13px; }
+    .escalate-btn { background: #FFFFFF; color: #333; border: 1px solid var(--border); }
+    .validate-btn { background: var(--success-text); }
+    .escalated-notice { font-size: 12px; color: var(--danger-text); font-weight: 600; margin: 0 0 6px; }
+  </style>
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <nav class="topnav">
+    <div>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="/report.html">Signaler</a>
+      <a href="/assign-task.html" id="assign-link" style="display:none;">Assigner</a>
+      <a href="/team-lead-validation.html">Ma zone</a>
+    </div>
+    <button class="logout" id="logout-button">Déconnexion</button>
+  </nav>
+
+  <main class="page">
+    <h1 class="section-title">Signalements de ma zone</h1>
+    <div id="access-denied" style="display:none;" class="error-message">
+      Cette page est réservée aux chefs d'équipe.
+    </div>
+    <div id="reports-list"></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/offlineDb.js"></script>
+  <script src="js/security.js"></script>
+  <script src="js/syncQueue.js"></script>
+  <script src="js/pushNotifications.js"></script>
+  <script>
+    async function init() {
+      const session = await requireSession();
+      if (!session) return;
+
+      await initOfflineSupport();
+
+      const profile = await getCurrentProfile();
+      if (!profile) return;
+
+      if (profile.role !== "TEAM_LEAD") {
+        document.getElementById("access-denied").style.display = "block";
+        return;
+      }
+
+      document.getElementById("logout-button").addEventListener("click", logout);
+      document.getElementById("assign-link").style.display = "inline";
+      await loadReports();
+    }
+
+    async function loadReports() {
+      // Pas de filtre explicite sur zone_id : la policy "reports_select"
+      // restreint déjà automatiquement aux signalements de la zone du chef
+      // d'équipe connecté. Documenté ici par principe, comme sur dashboard.html.
+      const { data: reports, error } = await supabaseClient
+        .from("reports")
+        .select("id, description, perceived_severity, status")
+        .neq("status", "CLOSED")
+        .order("created_at", { ascending: false });
+
+      const container = document.getElementById("reports-list");
+      container.innerHTML = "";
+
+      if (error || !reports || reports.length === 0) {
+        container.textContent = "Aucun signalement en attente dans votre zone.";
+        return;
+      }
+
+      reports.forEach((report) => renderReportCard(container, report));
+    }
+
+    function renderReportCard(container, report) {
+      const isCritical = report.perceived_severity === "CRITICAL";
+      const card = document.createElement("div");
+      card.className = "report-item";
+      card.dataset.reportId = report.id;
+      card.style.flexDirection = "column";
+      card.style.alignItems = "stretch";
+      if (isCritical) card.style.borderColor = "var(--danger-text)";
+
+      const severityLabel = { CRITICAL: "Critique", MODERATE: "Modéré", MINOR: "Mineur" }[report.perceived_severity];
+      const severityClass = { CRITICAL: "critical", MODERATE: "moderate", MINOR: "minor" }[report.perceived_severity];
+
+      card.innerHTML = `
+        ${isCritical ? '<p class="escalated-notice">↑ Remonté automatiquement au directeur</p>' : ""}
+        <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+          <p class="report-desc" style="flex:1;">${escapeHtml(report.description)}</p>
+          <span class="badge ${severityClass}">${escapeHtml(severityLabel)}</span>
+        </div>
+      `;
+
+      // Un signalement critique reste en lecture seule ici — la policy
+      // "reports_update_validation" rejetterait de toute façon la tentative
+      // (perceived_severity <> 'CRITICAL' est une condition stricte côté
+      // base), mais on évite même de proposer l'action à l'écran.
+      if (!isCritical) {
+        const actionRow = document.createElement("div");
+        actionRow.className = "action-row";
+        actionRow.innerHTML = `
+          <button class="escalate-btn" type="button">Escalader</button>
+          <button class="validate-btn" type="button">Valider</button>
+        `;
+        actionRow.children[0].addEventListener("click", () => handleAction(report.id, "IN_PROGRESS", "Escaladé au directeur"));
+        actionRow.children[1].addEventListener("click", () => handleAction(report.id, "CLOSED", null));
+        card.appendChild(actionRow);
+      }
+
+      container.appendChild(card);
+    }
+
+    async function handleAction(reportId, newStatus, comment) {
+      // Passe par queueAction() plutôt qu'un update direct : la validation
+      // fonctionne même hors-ligne (un chef d'équipe peut traiter des
+      // signalements en zone blanche), avec la même gestion de conflit
+      // "première synchronisation gagne" que côté React Native — voir
+      // applyAction() dans syncQueue.js pour la logique de conflit.
+      await queueAction("VALIDATE_REPORT", { reportId, status: newStatus, comment });
+
+      // Optimistic UI : le signalement disparaît immédiatement de la liste,
+      // sans attendre la confirmation serveur — cohérent avec le principe
+      // d'écriture optimiste retenu pour tout le mode offline-first.
+      document.querySelectorAll(".report-item").forEach((el) => {
+        if (el.dataset.reportId === reportId) el.remove();
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>

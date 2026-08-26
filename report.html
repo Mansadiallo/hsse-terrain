@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Signaler un incident — Outil terrain HSSE</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data: blob:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';
+                 worker-src 'self';" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <nav class="topnav">
+    <div>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="/report.html">Signaler</a>
+      <a href="/assign-task.html" id="assign-link" style="display:none;">Assigner</a>
+      <a href="/team-lead-validation.html" id="team-lead-link" style="display:none;">Ma zone</a>
+      <a href="/settings.html" id="settings-link" style="display:none;">Paramétrage</a>
+    </div>
+    <button class="logout" id="logout-button">Déconnexion</button>
+  </nav>
+
+  <main class="page">
+    <h1 class="section-title">Signaler un incident</h1>
+
+    <form id="report-form" novalidate>
+      <label>Catégorie du risque</label>
+      <div class="chip-row" id="category-chips">
+        <button type="button" class="chip active" data-value="Sécurité">Sécurité</button>
+        <button type="button" class="chip" data-value="Environnement">Environnement</button>
+        <button type="button" class="chip" data-value="Hygiène">Hygiène</button>
+        <button type="button" class="chip" data-value="Qualité">Qualité</button>
+      </div>
+      <input type="hidden" id="category" value="Sécurité" />
+
+      <label for="description">Description</label>
+      <textarea id="description" maxlength="1000" required placeholder="Décrivez ce que vous observez"></textarea>
+
+      <label>Gravité perçue</label>
+      <div class="chip-row" id="severity-chips">
+        <button type="button" class="chip" data-value="MINOR">Mineur</button>
+        <button type="button" class="chip active" data-value="MODERATE">Modéré</button>
+        <button type="button" class="chip" data-value="CRITICAL">Critique</button>
+      </div>
+      <input type="hidden" id="severity" value="MODERATE" />
+
+      <label for="photo">Photo</label>
+      <input type="file" id="photo" accept="image/jpeg,image/png,image/webp" />
+      <img id="photo-preview" style="display:none; max-width:100%; margin-top:10px; border-radius:8px;" alt="Aperçu de la photo jointe" />
+
+      <p id="error-message" class="error-message" role="alert" aria-live="polite"></p>
+
+      <button type="submit" id="submit-button">Envoyer le signalement</button>
+    </form>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/offlineDb.js"></script>
+  <script src="js/security.js"></script>
+  <script src="js/syncQueue.js"></script>
+  <script src="js/pushNotifications.js"></script>
+  <script>
+    let currentProfile = null;
+
+    async function init() {
+      const session = await requireSession();
+      if (!session) return;
+
+      await initOfflineSupport();
+
+      currentProfile = await getCurrentProfile();
+      if (!currentProfile) return;
+
+      if (currentProfile.role === "DIRECTOR") {
+        document.getElementById("settings-link").style.display = "inline";
+        document.getElementById("assign-link").style.display = "inline";
+      }
+      if (currentProfile.role === "TEAM_LEAD") {
+        document.getElementById("team-lead-link").style.display = "inline";
+        document.getElementById("assign-link").style.display = "inline";
+      }
+
+      document.getElementById("logout-button").addEventListener("click", logout);
+      setupChipGroup("category-chips", "category");
+      setupChipGroup("severity-chips", "severity");
+    }
+
+    function setupChipGroup(groupId, hiddenInputId) {
+      const group = document.getElementById(groupId);
+      const hiddenInput = document.getElementById(hiddenInputId);
+
+      group.querySelectorAll(".chip").forEach((chip) => {
+        chip.addEventListener("click", () => {
+          group.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+          chip.classList.add("active");
+          hiddenInput.value = chip.dataset.value;
+        });
+      });
+    }
+
+    const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
+    const MAX_SIZE_BYTES = 8 * 1024 * 1024;
+    let selectedPhotoFile = null;
+
+    document.getElementById("photo").addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      const errorMessage = document.getElementById("error-message");
+      errorMessage.textContent = "";
+
+      if (!file) {
+        selectedPhotoFile = null;
+        return;
+      }
+
+      // Validation côté client : confort immédiat pour l'utilisateur, mais
+      // le bucket Supabase applique la même contrainte (allowed_mime_types,
+      // file_size_limit) — un client altéré ne pourrait pas la contourner.
+      if (!ALLOWED_TYPES.includes(file.type)) {
+        errorMessage.textContent = "Format d'image non supporté (JPEG, PNG ou WebP uniquement).";
+        event.target.value = "";
+        return;
+      }
+      if (file.size > MAX_SIZE_BYTES) {
+        errorMessage.textContent = "Photo trop volumineuse (8 Mo maximum).";
+        event.target.value = "";
+        return;
+      }
+
+      selectedPhotoFile = file;
+      const preview = document.getElementById("photo-preview");
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+    });
+
+    // Upload la photo dans un dossier nommé d'après l'utilisateur — cohérent
+    // avec la policy "photos_insert_own_folder", qui exige que le premier
+    // segment du chemin corresponde exactement à auth.uid().
+    // uploadPhotoFile(file) est définie dans js/syncQueue.js, partagée avec
+    // la logique de synchronisation différée pour éviter toute duplication.
+
+    document.getElementById("report-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const errorMessage = document.getElementById("error-message");
+      const submitButton = document.getElementById("submit-button");
+      errorMessage.textContent = "";
+
+      const description = document.getElementById("description").value.trim();
+      const category = document.getElementById("category").value;
+      const severity = document.getElementById("severity").value;
+
+      // Validation côté client : confort UX immédiat, mais ne remplace en
+      // rien les contraintes déjà imposées côté base (colonnes NOT NULL,
+      // type enum sur severity) — un client malveillant peut contourner ce
+      // JS, la base refusera quand même une valeur hors énumération.
+      if (!description) {
+        errorMessage.textContent = "Merci de décrire ce que vous observez.";
+        return;
+      }
+      if (description.length > 1000) {
+        errorMessage.textContent = "Description trop longue (1000 caractères maximum).";
+        return;
+      }
+
+      submitButton.disabled = true;
+      submitButton.textContent = "Enregistrement...";
+
+      // Si le réseau est disponible, l'upload est tenté immédiatement.
+      // Sinon, le fichier lui-même est conservé (IndexedDB supporte le
+      // stockage de Blob/File nativement) et l'upload sera retenté à la
+      // prochaine synchronisation — même principe que côté React Native.
+      let photoUrl = null;
+      let localPhotoFile = null;
+      if (selectedPhotoFile) {
+        if (navigator.onLine) {
+          photoUrl = await uploadPhotoFile(selectedPhotoFile);
+        }
+        if (!photoUrl) {
+          localPhotoFile = selectedPhotoFile;
+        }
+      }
+
+      // author_id et zone_id ne sont jamais pris depuis un champ de
+      // formulaire modifiable — author_id vient de la session serveur
+      // (jamais du client), zone_id du profil déjà vérifié. Même si un
+      // client altérait ces valeurs, la policy RLS "reports_insert_own"
+      // rejette toute tentative où author_id ne correspond pas à l'utilisateur
+      // authentifié (OWASP A01 - Broken Access Control).
+      //
+      // L'écriture passe par queueAction() plutôt que par un insert direct :
+      // le signalement est d'abord enregistré en local (IndexedDB), la
+      // confirmation est immédiate quel que soit l'état du réseau, et la
+      // synchronisation réelle vers Supabase a lieu en arrière-plan.
+      await queueAction("CREATE_REPORT", {
+        author_id: currentProfile.id,
+        zone_id: currentProfile.zone_id,
+        category,
+        description,
+        perceived_severity: severity,
+        photo_url: photoUrl,
+        localPhotoFile,
+      });
+
+      window.location.href = "/dashboard.html";
+    });
+
+    init();
+  </script>
+</body>
+</html>

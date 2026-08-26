@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Connexion — Outil terrain HSSE</title>
+
+  <!--
+    Content Security Policy — OWASP A05 (Security Misconfiguration) :
+    limite les origines depuis lesquelles des scripts/styles peuvent être
+    chargés, réduisant fortement l'impact d'une éventuelle injection XSS
+    même si escapeHtml() était oublié quelque part.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <main class="auth-page">
+    <div class="auth-card">
+      <h1>Outil terrain HSSE</h1>
+      <p class="subtitle">Connexion</p>
+
+      <form id="login-form" novalidate>
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" autocomplete="username" required maxlength="255" />
+
+        <label for="password">Mot de passe</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required minlength="8" maxlength="128" />
+
+        <p id="error-message" class="error-message" role="alert" aria-live="polite"></p>
+
+        <button type="submit" id="submit-button">Se connecter</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- SDK Supabase chargé depuis un CDN de confiance, autorisé explicitement par la CSP. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/security.js"></script>
+  <script>
+    const form = document.getElementById("login-form");
+    const errorMessage = document.getElementById("error-message");
+    const submitButton = document.getElementById("submit-button");
+
+    // Si une session valide existe déjà, inutile de repasser par le login.
+    (async () => {
+      const { data } = await supabaseClient.auth.getSession();
+      if (data.session) {
+        window.location.href = "/dashboard.html";
+      }
+    })();
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      errorMessage.textContent = "";
+      submitButton.disabled = true;
+      submitButton.textContent = "Connexion...";
+
+      // Les champs email/password sont lus via .value (pas insérés dans le
+      // DOM), donc pas de risque XSS ici — le point sensible est ailleurs
+      // (affichage de données provenant de la base, voir dashboard.html).
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
+
+      const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+
+      if (error) {
+        // OWASP A07 (Authentication Failures) : message d'erreur générique,
+        // ne révèle jamais si c'est l'email ou le mot de passe qui est
+        // incorrect — évite l'énumération de comptes existants.
+        errorMessage.textContent = "Identifiants invalides. Veuillez réessayer.";
+        submitButton.disabled = false;
+        submitButton.textContent = "Se connecter";
+        return;
+      }
+
+      window.location.href = "/dashboard.html";
+    });
+  </script>
+</body>
+</html>

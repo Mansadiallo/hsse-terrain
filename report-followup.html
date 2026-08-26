@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Suivi du signalement — Outil terrain HSSE</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';
+                 worker-src 'self';" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+  <style>
+    .timeline-row { display: flex; gap: 12px; }
+    .timeline-marker { display: flex; flex-direction: column; align-items: center; }
+    .timeline-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--success-text); }
+    .timeline-line { width: 1px; flex: 1; background: var(--border); min-height: 28px; }
+    .timeline-content { padding-bottom: 16px; }
+    .timeline-label { font-size: 14px; font-weight: 500; margin: 0; }
+    .timeline-date { font-size: 12px; color: var(--text-secondary); margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <nav class="topnav">
+    <div>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="/report.html">Signaler</a>
+      <a href="/assign-task.html" id="assign-link" style="display:none;">Assigner</a>
+      <a href="/team-lead-validation.html" id="team-lead-link" style="display:none;">Ma zone</a>
+      <a href="/settings.html" id="settings-link" style="display:none;">Paramétrage</a>
+    </div>
+    <button class="logout" id="logout-button">Déconnexion</button>
+  </nav>
+
+  <main class="page">
+    <h1 class="section-title">Suivi</h1>
+    <div id="timeline"></div>
+    <div id="comment-box" style="display:none;" class="info-box"></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/offlineDb.js"></script>
+  <script src="js/security.js"></script>
+  <script src="js/syncQueue.js"></script>
+  <script src="js/pushNotifications.js"></script>
+  <script>
+    const STEP_LABELS = { created: "Envoyé", seen: "Vu", validated: "En cours de traitement", closed: "Clôturé" };
+
+    function getReportIdFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("id");
+    }
+
+    async function init() {
+      const session = await requireSession();
+      if (!session) return;
+
+      await initOfflineSupport();
+
+      document.getElementById("logout-button").addEventListener("click", logout);
+
+      const profile = await getCurrentProfile();
+      if (profile) {
+        if (profile.role === "DIRECTOR") {
+          document.getElementById("settings-link").style.display = "inline";
+          document.getElementById("assign-link").style.display = "inline";
+        }
+        if (profile.role === "TEAM_LEAD") {
+          document.getElementById("team-lead-link").style.display = "inline";
+          document.getElementById("assign-link").style.display = "inline";
+        }
+      }
+
+      const reportId = getReportIdFromUrl();
+      if (!reportId) {
+        document.getElementById("timeline").textContent = "Aucun signalement sélectionné.";
+        return;
+      }
+
+      // Protégé par la policy "audit_logs_select" : ne renvoie que les
+      // entrées liées à un signalement que l'utilisateur a le droit de voir
+      // (le sien, sa zone, ou tout si directeur) — même filtrage implicite
+      // qu'on retrouve partout ailleurs via RLS.
+      const { data: history, error } = await supabaseClient
+        .from("audit_logs")
+        .select("id, action, comment, created_at, profiles(name)")
+        .eq("report_id", reportId)
+        .order("created_at", { ascending: true });
+
+      if (error || !history || history.length === 0) {
+        document.getElementById("timeline").textContent = "Aucun historique disponible pour ce signalement.";
+        return;
+      }
+
+      renderTimeline(history);
+    }
+
+    function renderTimeline(history) {
+      const container = document.getElementById("timeline");
+      container.innerHTML = "";
+
+      history.forEach((entry, index) => {
+        const row = document.createElement("div");
+        row.className = "timeline-row";
+
+        const label = STEP_LABELS[entry.action] || entry.action;
+        const actorName = entry.profiles ? entry.profiles.name : "";
+        const date = new Date(entry.created_at).toLocaleString("fr-FR");
+        const isLast = index === history.length - 1;
+
+        // Toutes les valeurs affichées (label dérivé d'un enum contrôlé,
+        // mais actorName et date proviennent indirectement de données
+        // utilisateur) passent par escapeHtml() avant insertion.
+        row.innerHTML = `
+          <div class="timeline-marker">
+            <div class="timeline-dot"></div>
+            ${!isLast ? '<div class="timeline-line"></div>' : ""}
+          </div>
+          <div class="timeline-content">
+            <p class="timeline-label">${escapeHtml(label)}</p>
+            <p class="timeline-date">${escapeHtml(date)} · ${escapeHtml(actorName)}</p>
+          </div>
+        `;
+        container.appendChild(row);
+      });
+
+      const lastWithComment = [...history].reverse().find((h) => h.comment);
+      if (lastWithComment) {
+        const commentBox = document.getElementById("comment-box");
+        const actorName = lastWithComment.profiles ? lastWithComment.profiles.name : "";
+        commentBox.innerHTML = `<strong>Commentaire de ${escapeHtml(actorName)}</strong><br>${escapeHtml(lastWithComment.comment)}`;
+        commentBox.style.display = "block";
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

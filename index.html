@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Outil terrain HSSE</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';
+                 worker-src 'self';" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <!--
+    Page purement technique : aucun contenu visible n'est censé apparaître,
+    la redirection est quasi instantanée. Le court message ci-dessous ne
+    sert qu'en cas de lenteur réseau exceptionnelle.
+  -->
+  <main class="auth-page">
+    <p class="subtitle">Chargement…</p>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script>
+    // Redirige vers le dashboard si une session valide existe déjà,
+    // sinon vers la page de connexion — évite d'exposer une page d'accueil
+    // "vitrine" inutile pour un outil interne, et simplifie l'accès direct
+    // à l'URL racine du déploiement (ex. Netlify Drop).
+    (async () => {
+      const { data } = await supabaseClient.auth.getSession();
+      window.location.replace(data.session ? "/dashboard.html" : "/login.html");
+    })();
+  </script>
+</body>
+</html>

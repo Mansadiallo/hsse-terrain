@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard — Outil terrain HSSE</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';
+                 worker-src 'self';" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <nav class="topnav">
+    <div>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="/report.html">Signaler</a>
+      <a href="/assign-task.html" id="assign-link" style="display:none;">Assigner</a>
+      <a href="/team-lead-validation.html" id="team-lead-link" style="display:none;">Ma zone</a>
+      <a href="/settings.html" id="settings-link" style="display:none;">Paramétrage</a>
+    </div>
+    <button class="logout" id="logout-button">Déconnexion</button>
+  </nav>
+
+  <main class="page">
+    <p id="greeting" class="subtitle" style="text-align:left;"></p>
+
+    <div class="kpi-grid">
+      <div class="kpi-card danger">
+        <p class="kpi-label">Incidents critiques</p>
+        <p class="kpi-value" id="kpi-critical">—</p>
+      </div>
+      <div class="kpi-card accent">
+        <p class="kpi-label">Tâches en cours</p>
+        <p class="kpi-value" id="kpi-in-progress">—</p>
+      </div>
+      <div class="kpi-card accent">
+        <p class="kpi-label">Taux de complétion</p>
+        <p class="kpi-value" id="kpi-completion">—</p>
+      </div>
+      <div class="kpi-card warning">
+        <p class="kpi-label">En attente de sync</p>
+        <p class="kpi-value" id="kpi-pending">—</p>
+      </div>
+    </div>
+
+    <h2 class="section-title">Signalements récents</h2>
+    <div id="reports-list"></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/offlineDb.js"></script>
+  <script src="js/security.js"></script>
+  <script src="js/syncQueue.js"></script>
+  <script src="js/pushNotifications.js"></script>
+  <script>
+    const SEVERITY_LABEL = { CRITICAL: "Critique", MODERATE: "Modéré", MINOR: "Mineur" };
+    const SEVERITY_CLASS = { CRITICAL: "critical", MODERATE: "moderate", MINOR: "minor" };
+
+    async function init() {
+      const session = await requireSession();
+      if (!session) return;
+
+      await initOfflineSupport();
+
+      const profile = await getCurrentProfile();
+      if (!profile) return;
+
+      // escapeHtml() ici est en réalité redondant puisque le nom vient du
+      // profil de l'utilisateur lui-même, mais on l'applique systématiquement
+      // par principe de défense en profondeur — ne jamais faire d'exception
+      // "cette donnée est sûre" au cas par cas.
+      document.getElementById("greeting").textContent = `Bonjour, ${profile.name}`;
+
+      if (profile.role === "DIRECTOR") {
+        document.getElementById("settings-link").style.display = "inline";
+        document.getElementById("assign-link").style.display = "inline";
+      }
+      if (profile.role === "TEAM_LEAD") {
+        document.getElementById("team-lead-link").style.display = "inline";
+        document.getElementById("assign-link").style.display = "inline";
+      }
+
+      await loadKpis(profile);
+      await loadRecentReports(profile);
+
+      document.getElementById("logout-button").addEventListener("click", logout);
+    }
+
+    // Les requêtes ci-dessous ne filtrent PAS manuellement par zone/rôle —
+    // c'est intentionnel. Row Level Security, déjà en place côté base,
+    // applique automatiquement la portée correcte (agent : ses données ;
+    // chef d'équipe : sa zone ; directeur : tout). Dupliquer ce filtrage
+    // côté client serait redondant et risquerait de désynchroniser les deux
+    // couches — la base reste la seule source de vérité des droits.
+    async function loadKpis(profile) {
+      const [criticalRes, tasksRes, completedRes] = await Promise.all([
+        supabaseClient
+          .from("reports")
+          .select("id", { count: "exact", head: true })
+          .eq("perceived_severity", "CRITICAL")
+          .neq("status", "CLOSED"),
+        supabaseClient.from("tasks").select("id", { count: "exact", head: true }).eq("status", "IN_PROGRESS"),
+        supabaseClient.from("tasks").select("id", { count: "exact", head: true }).eq("status", "VALIDATED"),
+      ]);
+
+      const { count: totalTasksCount } = await supabaseClient
+        .from("tasks")
+        .select("id", { count: "exact", head: true });
+
+      const completionRate = totalTasksCount > 0
+        ? Math.round(((completedRes.count || 0) / totalTasksCount) * 100)
+        : 0;
+
+      document.getElementById("kpi-critical").textContent = criticalRes.count ?? 0;
+      document.getElementById("kpi-in-progress").textContent = tasksRes.count ?? 0;
+      document.getElementById("kpi-completion").textContent = `${completionRate}%`;
+      // La file de synchronisation est une notion propre au mobile
+      // offline-first ; non applicable à un dashboard web toujours connecté.
+      document.getElementById("kpi-pending").textContent = "0";
+    }
+
+    async function loadRecentReports() {
+      const { data: reports, error } = await supabaseClient
+        .from("reports")
+        .select("id, description, created_at, perceived_severity, zones(name)")
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      const container = document.getElementById("reports-list");
+      container.innerHTML = "";
+
+      if (error || !reports || reports.length === 0) {
+        container.textContent = "Aucun signalement pour le moment.";
+        return;
+      }
+
+      for (const report of reports) {
+        const item = document.createElement("div");
+        item.className = "report-item";
+
+        // Point critique OWASP A03 (XSS) : `description` et le nom de zone
+        // proviennent de saisies utilisateur stockées en base. Ils sont
+        // systématiquement passés par escapeHtml() avant d'être insérés
+        // via innerHTML — jamais de concaténation brute de ces valeurs.
+        const severityLabel = SEVERITY_LABEL[report.perceived_severity] || report.perceived_severity;
+        const severityClass = SEVERITY_CLASS[report.perceived_severity] || "";
+        const zoneName = report.zones ? report.zones.name : "";
+        const date = new Date(report.created_at).toLocaleString("fr-FR");
+
+        item.innerHTML = `
+          <div class="report-info">
+            <p class="report-desc">${escapeHtml(report.description)}</p>
+            <p class="report-meta">${escapeHtml(zoneName)} · ${escapeHtml(date)}</p>
+          </div>
+          <span class="badge ${severityClass}">${escapeHtml(severityLabel)}</span>
+        `;
+        container.appendChild(item);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

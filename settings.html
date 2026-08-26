@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Paramétrage — Outil terrain HSSE</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';
+                 worker-src 'self';" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <nav class="topnav">
+    <div>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="/report.html">Signaler</a>
+      <a href="/assign-task.html" id="assign-link" style="display:none;">Assigner</a>
+      <a href="/settings.html">Paramétrage</a>
+    </div>
+    <button class="logout" id="logout-button">Déconnexion</button>
+  </nav>
+
+  <main class="page">
+    <h1 class="section-title">Modèle de checklists</h1>
+    <div id="access-denied" style="display:none;" class="error-message">
+      Cette page est réservée aux directeurs.
+    </div>
+    <div id="settings-content" style="display:none;">
+      <div id="categories-list"></div>
+      <div class="info-box">
+        Les modifications s'appliquent aux futurs signalements. L'historique conserve
+        la version utilisée au moment de la soumission.
+      </div>
+      <button id="publish-button">Publier une nouvelle version</button>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/offlineDb.js"></script>
+  <script src="js/security.js"></script>
+  <script src="js/syncQueue.js"></script>
+  <script src="js/pushNotifications.js"></script>
+  <script>
+    let currentStructure = null;
+    let currentModelId = null;
+
+    async function init() {
+      const session = await requireSession();
+      if (!session) return;
+
+      await initOfflineSupport();
+
+      const profile = await getCurrentProfile();
+      if (!profile) return;
+
+      // Double vérification, cohérente avec le principe de défense en
+      // profondeur : la policy RLS "checklist_versions_insert" bloquerait de
+      // toute façon un non-directeur côté base, mais on évite ici même
+      // d'afficher un formulaire qu'il ne pourrait pas soumettre.
+      if (profile.role !== "DIRECTOR") {
+        document.getElementById("access-denied").style.display = "block";
+        return;
+      }
+
+      document.getElementById("settings-content").style.display = "block";
+      document.getElementById("assign-link").style.display = "inline";
+      document.getElementById("logout-button").addEventListener("click", logout);
+
+      await loadActiveModel(profile.site_id);
+      document.getElementById("publish-button").addEventListener("click", publishNewVersion);
+    }
+
+    async function loadActiveModel(siteId) {
+      const { data: model } = await supabaseClient
+        .from("checklist_models")
+        .select("id")
+        .eq("site_id", siteId)
+        .maybeSingle();
+
+      if (!model) {
+        document.getElementById("categories-list").textContent = "Aucun modèle configuré pour ce site.";
+        return;
+      }
+
+      currentModelId = model.id;
+
+      const { data: version } = await supabaseClient
+        .from("checklist_model_versions")
+        .select("id, structure")
+        .eq("checklist_model_id", model.id)
+        .order("version_number", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!version) {
+        document.getElementById("categories-list").textContent = "Aucune version publiée pour ce modèle.";
+        return;
+      }
+
+      currentStructure = version.structure;
+      renderCategories();
+    }
+
+    function renderCategories() {
+      const container = document.getElementById("categories-list");
+      container.innerHTML = "";
+
+      currentStructure.categories.forEach((category, index) => {
+        const row = document.createElement("div");
+        row.className = "report-item";
+        row.style.borderLeft = "4px solid var(--brand-blue)";
+
+        // Toutes les données affichées ici proviennent d'un champ JSONB
+        // renseigné exclusivement par un directeur (via ce même écran, protégé
+        // par RLS) — mais on applique escapeHtml() par principe, sans exception.
+        const checked = category.enabled ? "checked" : "";
+        const disabled = category.core ? "disabled" : "";
+        const coreLabel = category.core ? " · socle recommandé" : "";
+
+        row.innerHTML = `
+          <div class="report-info">
+            <p class="report-desc">${escapeHtml(category.name)}</p>
+            <p class="report-meta">${escapeHtml(String(category.itemCount || 0))} items${escapeHtml(coreLabel)}</p>
+          </div>
+          <input type="checkbox" data-index="${index}" ${checked} ${disabled} style="width:20px;height:20px;" />
+        `;
+        container.appendChild(row);
+      });
+
+      container.querySelectorAll("input[type=checkbox]").forEach((input) => {
+        input.addEventListener("change", (event) => {
+          const index = Number(event.target.dataset.index);
+          currentStructure.categories[index].enabled = event.target.checked;
+        });
+      });
+    }
+
+    async function publishNewVersion() {
+      const button = document.getElementById("publish-button");
+      button.disabled = true;
+      button.textContent = "Publication...";
+
+      // Récupère le dernier numéro de version pour l'incrémenter — jamais
+      // d'écrasement de la version précédente, cohérent avec le principe
+      // de versionnement figé défini dans les spécifications.
+      const { data: lastVersion } = await supabaseClient
+        .from("checklist_model_versions")
+        .select("version_number")
+        .eq("checklist_model_id", currentModelId)
+        .order("version_number", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const nextVersionNumber = (lastVersion?.version_number || 0) + 1;
+
+      // Protégé par la policy "checklist_versions_insert" : seul un
+      // utilisateur avec current_role() = 'DIRECTOR' peut réussir cet insert,
+      // quelle que soit la requête envoyée depuis le client.
+      const { error } = await supabaseClient.from("checklist_model_versions").insert({
+        checklist_model_id: currentModelId,
+        version_number: nextVersionNumber,
+        structure: currentStructure,
+      });
+
+      button.disabled = false;
+      button.textContent = "Publier une nouvelle version";
+
+      if (error) {
+        alert("Impossible de publier la nouvelle version.");
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

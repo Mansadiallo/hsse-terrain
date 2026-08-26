@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Assigner une tâche — Outil terrain HSSE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#185FA5" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' https://cdn.jsdelivr.net;
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+                 font-src 'self' https://fonts.gstatic.com;
+                 connect-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co;
+                 img-src 'self' https://rqhcanhyrnhepzqmigvs.supabase.co data:;
+                 frame-ancestors 'none';
+                 base-uri 'self';
+                 form-action 'self';
+                 manifest-src 'self';
+                 worker-src 'self';" />
+</head>
+<body>
+  <div class="hazard-strip"></div>
+  <nav class="topnav">
+    <div>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="/report.html">Signaler</a>
+      <a href="/assign-task.html">Assigner</a>
+      <a href="/team-lead-validation.html" id="team-lead-link" style="display:none;">Ma zone</a>
+      <a href="/settings.html" id="settings-link" style="display:none;">Paramétrage</a>
+    </div>
+    <button class="logout" id="logout-button">Déconnexion</button>
+  </nav>
+
+  <main class="page">
+    <h1 class="section-title">Assigner une tâche</h1>
+    <div id="access-denied" style="display:none;" class="error-message">
+      Cette page est réservée aux chefs d'équipe et aux directeurs.
+    </div>
+
+    <form id="task-form" style="display:none;" novalidate>
+      <label for="zone-select">Zone</label>
+      <select id="zone-select" required></select>
+
+      <label for="assignee-select">Agent assigné</label>
+      <select id="assignee-select" required></select>
+
+      <label for="type-select">Type de tâche</label>
+      <select id="type-select">
+        <option value="Inspection">Inspection</option>
+        <option value="Checklist">Checklist</option>
+        <option value="Action corrective">Action corrective</option>
+      </select>
+
+      <label for="due-date">Échéance</label>
+      <input type="date" id="due-date" />
+
+      <p id="error-message" class="error-message" role="alert" aria-live="polite"></p>
+      <p id="success-message" class="error-message" style="color: var(--success-text);" role="status" aria-live="polite"></p>
+
+      <button type="submit" id="submit-button">Assigner la tâche</button>
+    </form>
+
+    <h2 class="section-title" style="margin-top: 32px;">Tâches créées récemment</h2>
+    <div id="tasks-list"></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/offlineDb.js"></script>
+  <script src="js/security.js"></script>
+  <script src="js/syncQueue.js"></script>
+  <script src="js/pushNotifications.js"></script>
+  <script>
+    let currentProfile = null;
+
+    async function init() {
+      const session = await requireSession();
+      if (!session) return;
+
+      await initOfflineSupport();
+
+      currentProfile = await getCurrentProfile();
+      if (!currentProfile) return;
+
+      // Double vérification côté UI, cohérente avec le principe de défense
+      // en profondeur déjà appliqué ailleurs (settings.html) : la policy
+      // RLS "tasks_insert" bloquerait de toute façon un agent côté base,
+      // mais on évite ici même d'afficher un formulaire inutilisable pour lui.
+      if (currentProfile.role !== "TEAM_LEAD" && currentProfile.role !== "DIRECTOR") {
+        document.getElementById("access-denied").style.display = "block";
+        return;
+      }
+
+      if (currentProfile.role === "DIRECTOR") {
+        document.getElementById("settings-link").style.display = "inline";
+      }
+      if (currentProfile.role === "TEAM_LEAD") {
+        document.getElementById("team-lead-link").style.display = "inline";
+      }
+
+      document.getElementById("logout-button").addEventListener("click", logout);
+      document.getElementById("task-form").style.display = "block";
+
+      await loadZones();
+      document.getElementById("zone-select").addEventListener("change", loadAssignees);
+      await loadAssignees();
+      await loadRecentTasks();
+
+      document.getElementById("task-form").addEventListener("submit", handleSubmit);
+    }
+
+    // Un chef d'équipe ne voit que sa propre zone dans la liste — il ne
+    // pourrait de toute façon pas assigner ailleurs (policy "tasks_insert"),
+    // autant ne pas lui proposer un choix qui échouerait à la soumission.
+    // Le directeur voit toutes les zones de son site.
+    async function loadZones() {
+      const select = document.getElementById("zone-select");
+      select.innerHTML = "";
+
+      const { data: zones } = await supabaseClient
+        .from("zones")
+        .select("id, name")
+        .eq("site_id", currentProfile.site_id);
+
+      const visibleZones =
+        currentProfile.role === "TEAM_LEAD"
+          ? (zones || []).filter((z) => z.id === currentProfile.zone_id)
+          : zones || [];
+
+      for (const zone of visibleZones) {
+        const option = document.createElement("option");
+        option.value = zone.id;
+        option.textContent = zone.name; // nom de zone contrôlé par le directeur via settings — pas une saisie libre d'agent
+        select.appendChild(option);
+      }
+    }
+
+    // Ne propose que des agents (jamais un autre chef d'équipe ou directeur
+    // comme assigné), dans la zone actuellement sélectionnée.
+    async function loadAssignees() {
+      const select = document.getElementById("assignee-select");
+      select.innerHTML = "";
+      const zoneId = document.getElementById("zone-select").value;
+      if (!zoneId) return;
+
+      const { data: agents } = await supabaseClient
+        .from("profiles")
+        .select("id, name")
+        .eq("role", "AGENT")
+        .eq("zone_id", zoneId);
+
+      if (!agents || agents.length === 0) {
+        const option = document.createElement("option");
+        option.textContent = "Aucun agent dans cette zone";
+        option.disabled = true;
+        select.appendChild(option);
+        return;
+      }
+
+      for (const agent of agents) {
+        const option = document.createElement("option");
+        option.value = agent.id;
+        option.textContent = agent.name;
+        select.appendChild(option);
+      }
+    }
+
+    async function handleSubmit(event) {
+      event.preventDefault();
+      const errorMessage = document.getElementById("error-message");
+      const successMessage = document.getElementById("success-message");
+      const submitButton = document.getElementById("submit-button");
+      errorMessage.textContent = "";
+      successMessage.textContent = "";
+
+      const zoneId = document.getElementById("zone-select").value;
+      const assigneeId = document.getElementById("assignee-select").value;
+      const type = document.getElementById("type-select").value;
+      const dueDate = document.getElementById("due-date").value;
+
+      if (!zoneId || !assigneeId) {
+        errorMessage.textContent = "Merci de sélectionner une zone et un agent.";
+        return;
+      }
+
+      submitButton.disabled = true;
+      submitButton.textContent = "Assignation...";
+
+      // creator_id vient de la session serveur, jamais d'un champ modifiable
+      // par le client. La policy "tasks_insert" revérifie côté base que le
+      // chef d'équipe assigne bien dans sa propre zone — même si ce
+      // formulaire ne propose déjà que sa zone, la protection réelle reste
+      // en base (OWASP A01, défense en profondeur).
+      //
+      // Passe par queueAction() plutôt qu'un insert direct : l'assignation
+      // fonctionne même hors-ligne (un chef d'équipe peut organiser sa
+      // journée en zone blanche), synchronisée dès la reconnexion.
+      await queueAction("CREATE_TASK", {
+        creator_id: currentProfile.id,
+        assignee_id: assigneeId,
+        zone_id: zoneId,
+        type,
+        due_date: dueDate || null,
+      });
+
+      submitButton.disabled = false;
+      submitButton.textContent = "Assigner la tâche";
+      successMessage.textContent = "Tâche enregistrée — sera synchronisée dès reconnexion si nécessaire.";
+      document.getElementById("task-form").reset();
+      await loadRecentTasks();
+    }
+
+    async function loadRecentTasks() {
+      const container = document.getElementById("tasks-list");
+      container.innerHTML = "";
+
+      // Pas de filtre explicite : la policy "tasks_select" restreint déjà
+      // aux tâches créées par l'utilisateur, assignées à lui, ou dans sa
+      // zone (chef d'équipe) / tout site (directeur) — même principe de
+      // confiance en RLS que sur les autres écrans.
+      const { data: tasks, error } = await supabaseClient
+        .from("tasks")
+        .select("id, type, status, due_date, profiles!tasks_assignee_id_fkey(name), zones(name)")
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      if (error || !tasks || tasks.length === 0) {
+        container.textContent = "Aucune tâche assignée pour le moment.";
+        return;
+      }
+
+      const STATUS_LABEL = {
+        ASSIGNED: "Assignée",
+        IN_PROGRESS: "En cours",
+        SUBMITTED: "Soumise",
+        VALIDATED: "Validée",
+        REJECTED: "Rejetée",
+      };
+
+      for (const task of tasks) {
+        const item = document.createElement("div");
+        item.className = "report-item";
+
+        const assigneeName = task.profiles ? task.profiles.name : "";
+        const zoneName = task.zones ? task.zones.name : "";
+        const statusLabel = STATUS_LABEL[task.status] || task.status;
+        const dueLabel = task.due_date ? new Date(task.due_date).toLocaleDateString("fr-FR") : "Sans échéance";
+
+        // Toutes les valeurs proviennent de données saisies par d'autres
+        // utilisateurs (nom d'agent, nom de zone) — passées par escapeHtml()
+        // avant insertion, sans exception.
+        item.innerHTML = `
+          <div class="report-info">
+            <p class="report-desc">${escapeHtml(task.type)} — ${escapeHtml(assigneeName)}</p>
+            <p class="report-meta">${escapeHtml(zoneName)} · échéance ${escapeHtml(dueLabel)}</p>
+          </div>
+          <span class="badge minor">${escapeHtml(statusLabel)}</span>
+        `;
+        container.appendChild(item);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
